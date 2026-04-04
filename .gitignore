@@ -1,0 +1,38 @@
+# Data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Go
+*.exe
+*.test
+*.out
+
+# Modely a cache
+*.bin
+*.safetensors
+*.onnx
+models/
+
+# Env
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,47 @@
+# docker-compose.yml
+# Volitelné — pro izolované prostředí
+# Použití: docker compose up
+
+version: "3.9"
+
+services:
+  # Ollama — lokální LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-edu-ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    # GPU podpora (odkomentuj pokud máš NVIDIA GPU):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # RAG server
+  rag-server:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    container_name: rag-edu-server
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - ollama
+    command: >
+      python python/rag/server.py
+        --db /app/data/chromadb
+        --ollama-url http://ollama:11434
+        --model qwen3:32b
+
+volumes:
+  ollama_models:
