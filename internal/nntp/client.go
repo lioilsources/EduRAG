@@ -305,6 +305,7 @@ func (c *Client) FetchRange(group string, first, last int64, workers int) (<-cha
 					if err != nil {
 						// Loguj ale nepřeruš — 423 (no article) je normální
 						slog.Debug("skip article", "num", num, "err", err)
+						results <- result{a: nil}
 						continue
 					}
 					a.Newsgroup = group

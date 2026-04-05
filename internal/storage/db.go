@@ -4,6 +4,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -39,9 +40,26 @@ type DB struct {
 
 // Open otevře nebo vytvoří SQLite databázi.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=10000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
+	}
+	// SQLite nepodporuje souběžné zápisy — force single connection
+	db.SetMaxOpenConns(1)
+
+	// DELETE mode: jednoduché POSIX file locks, žádný shm soubor,
+	// uvolní se automaticky při death procesu (i SIGKILL).
+	// WAL mode má problémy se shm mutexy na macOS při concurrent procesech.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=DELETE",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA busy_timeout=10000",
+		"PRAGMA cache_size=-64000",
+		"PRAGMA temp_store=MEMORY",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			return nil, fmt.Errorf("pragma %q: %w", pragma, err)
+		}
 	}
 
 	store := &DB{db: db}
@@ -93,6 +111,50 @@ func (s *DB) SaveDocument(d *Document) error {
 	`, d.ID, d.Source, d.Lang, d.Group, d.Title, d.Text, d.Hash(), d.CreatedAt)
 
 	return err
+}
+
+// SaveDocumentBatch uloží více dokumentů v jedné transakci — mnohem rychlejší než volat SaveDocument opakovaně.
+func (s *DB) SaveDocumentBatch(docs []*Document) (int, error) {
+	if len(docs) == 0 {
+		return 0, nil
+	}
+	// Context timeout — nikdy neblokuje déle než 30s (chrání před SQLite lock deadlockem)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO documents
+			(id, source, lang, grp, title, text, text_hash, created_at, embedded)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+	`)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	defer stmt.Close()
+
+	saved := 0
+	for _, d := range docs {
+		if d.ID == "" {
+			d.ID = fmt.Sprintf("%s_%s", d.Source, d.Hash())
+		}
+		if d.CreatedAt.IsZero() {
+			d.CreatedAt = time.Now()
+		}
+		res, err := stmt.ExecContext(ctx, d.ID, d.Source, d.Lang, d.Group, d.Title, d.Text, d.Hash(), d.CreatedAt)
+		if err != nil {
+			tx.Rollback()
+			return saved, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			saved++
+		}
+	}
+	return saved, tx.Commit()
 }
 
 // CountDocuments vrátí počet dokumentů podle filtru.

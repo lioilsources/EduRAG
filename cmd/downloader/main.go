@@ -27,7 +27,7 @@ func main() {
 	lang       := flag.String("lang", "simple", "Jazyk Wikipedia: 'simple', 'cs', 'en'")
 	maxPages   := flag.Int("max-pages", 50000, "Max počet Wikipedia stránek (0 = vše)")
 	nntpServer := flag.String("server", "", "NNTP server hostname")
-	nntpPort   := flag.Int("port", 563, "NNTP port (563=TLS, 119=plain)")
+	nntpPort   := flag.Int("port", 119, "NNTP port (563=TLS, 119=plain)")
 	nntpTLS    := flag.Bool("tls", true, "Použít TLS")
 	nntpUser   := flag.String("user", "", "NNTP username")
 	nntpPass   := flag.String("pass", "", "NNTP password")
@@ -114,47 +114,45 @@ func runWiki(db *storage.DB, proc *pipeline.Processor, dataDir, lang string, max
 	}
 
 	downloader := wiki.NewDownloader(cfg)
-	pages, errs := downloader.Download()
 
 	saved := 0
 	skipped := 0
 
-	for page := range pages {
+	err := downloader.Download(func(page *wiki.Page) error {
 		text := proc.ProcessWiki(page.Text)
 		if text == "" {
 			skipped++
-			continue
+			return nil
 		}
 
-		// Chunky — velké Wiki články rozdělit
 		chunks := pipeline.ChunkText(text, 1500, 150)
 
+		var batch []*storage.Document
 		for i, chunk := range chunks {
 			title := page.Title
 			if len(chunks) > 1 {
-				title = page.Title + " (část " + string(rune('0'+i+1)) + ")"
+				title = fmt.Sprintf("%s (část %d)", page.Title, i+1)
 			}
-
-			doc := &storage.Document{
+			batch = append(batch, &storage.Document{
 				Source: "wikipedia",
 				Lang:   lang,
 				Group:  "encyclopedia",
 				Title:  title,
 				Text:   chunk,
-			}
-
-			if err := db.SaveDocument(doc); err != nil {
-				slog.Debug("skip duplicate", "title", page.Title)
-				continue
-			}
-			saved++
+			})
 		}
-	}
 
-	if err, ok := <-errs; ok && err != nil {
-		slog.Error("Wiki download error", "err", err)
-	}
+		n, err := db.SaveDocumentBatch(batch)
+		if err != nil {
+			slog.Debug("batch save error", "title", page.Title, "err", err)
+		}
+		saved += n
+		return nil
+	})
 
+	if err != nil {
+		slog.Error("Wiki chyba", "err", err)
+	}
 	slog.Info("Wiki import hotov", "saved", saved, "skipped", skipped)
 }
 
@@ -223,8 +221,21 @@ func runNNTP(
 
 		saved := 0
 		skipped := 0
+		processed := 0
+		total := int(info.Last - first + 1)
+		groupStart := time.Now()
 
 		for article := range articles {
+			processed++
+			if processed%100 == 0 {
+				slog.Info("NNTP progress",
+					"group", group,
+					"zpracováno", processed,
+					"celkem", total,
+					"uloženo", saved,
+					"elapsed", time.Since(groupStart).Round(time.Second),
+				)
+			}
 			text := proc.ProcessUsenet(article.Body)
 			if text == "" {
 				skipped++

@@ -1,5 +1,8 @@
 .PHONY: setup download-wiki download-nntp process embed serve test
 
+-include .env
+export
+
 # ─── Setup ────────────────────────────────────────────────────────────────────
 
 setup:
