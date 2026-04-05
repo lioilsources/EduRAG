@@ -15,19 +15,24 @@ setup:
 # ─── Data pipeline ────────────────────────────────────────────────────────────
 
 download-wiki:
-	@echo "==> Stahování Simple English Wikipedia"
+	@echo "==> Stahování Simple English Wikipedia (všechny články → wiki_simple.db)"
 	go run cmd/downloader/main.go \
 		--source wiki \
 		--lang simple \
-		--max-pages 30000 \
 		--data-dir ./data
 
 download-wiki-cs:
-	@echo "==> Stahování České Wikipedie"
+	@echo "==> Stahování České Wikipedie (všechny články → wiki_cs.db)"
 	go run cmd/downloader/main.go \
 		--source wiki \
 		--lang cs \
-		--max-pages 20000 \
+		--data-dir ./data
+
+download-wiki-en:
+	@echo "==> Stahování English Wikipedia (všechny články → wiki_en.db, POZOR: ~20GB dump)"
+	go run cmd/downloader/main.go \
+		--source wiki \
+		--lang en \
 		--data-dir ./data
 
 download-nntp:
@@ -45,15 +50,18 @@ download-nntp:
 		--data-dir ./data
 
 # ─── Filozofie / Seneca ───────────────────────────────────────────────────────
+# Nový flow: 1) download-wiki-cs (jednou, plný dump → wiki_cs.db)
+#            2) filter-philosophy (libovolně-krát, SQL filter → rag_edu.db)
 
-download-philosophy-wiki:
-	@echo "==> Stahování české Wikipedie (filozofie/stoicismus)"
-	go run cmd/downloader/main.go \
-		--source wiki \
+filter-philosophy:
+	@echo "==> Filtrace filozofických článků: wiki_cs.db → rag_edu.db"
+	go run cmd/wiki-filter/main.go \
+		--wiki-db ./data/wiki_cs.db \
+		--rag-db ./data/rag_edu.db \
 		--lang cs \
-		--max-pages 5000 \
-		--topics "seneca,stoicismus,stoicism,stoic,filozofie,filosofie,marcus aurelius,epiktétos,epictetus,řím,antika,etika,ctnost,moudrost,virtue,wisdom,klid,štěstí,smrt,příroda,osud,rozum,logos" \
-		--data-dir ./data
+		--topics "Stoicismus,Seneca,Filozofie,Filosofie,Marcus Aurelius,Epiktétos,Epictetus,Stoicism,Stoic,Antika,Etika,Ctnost"
+
+download-philosophy-wiki: download-wiki-cs filter-philosophy
 
 download-philosophy-nntp:
 	@echo "==> Stahování Usenet (filozofické skupiny)"

@@ -28,16 +28,19 @@ const (
 	EnDumpURL = "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2"
 )
 
-// Page jeden článek z Wikipedia XML dumpu.
-type Page struct {
-	Title string
-	Text  string
-	Lang  string
+// Article jeden článek z Wikipedia XML dumpu — raw wikitext, před cleaningem.
+// Filter a cleaning se dělají až v pozdějších fázích (cmd/wiki-filter).
+type Article struct {
+	ID      int64  // Wikipedia page ID (kanonický klíč)
+	Title   string
+	RawText string // nezpracovaný wikitext
+	Lang    string
 }
 
 // xmlPage interní struktura pro encoding/xml decoder.
-// Jen pole, která skutečně potřebujeme — ns filter, redirect detekce, text revize.
+// Jen pole, která skutečně potřebujeme — id, ns filter, redirect detekce, text revize.
 type xmlPage struct {
+	ID       int64        `xml:"id"`
 	Title    string       `xml:"title"`
 	NS       int          `xml:"ns"`
 	Redirect *xmlRedirect `xml:"redirect"`
@@ -56,34 +59,14 @@ type xmlText struct {
 	Body string `xml:",chardata"`
 }
 
-// TopicFilter filtruje stránky podle relevantních témat.
-// Pro 1. stupeň ZŠ — přírodověda, dějepis, zeměpis, zahrádka, filozofie.
-var DefaultTopics = []string{
-	// Přírodověda
-	"plant", "animal", "biology", "ecology", "photosynthesis",
-	"weather", "climate", "water", "soil", "seed", "flower",
-	// Dějepis
-	"history", "ancient", "medieval", "war", "civilization",
-	"egypt", "rome", "greece", "castle", "knight",
-	// Zeměpis
-	"country", "continent", "river", "mountain", "ocean",
-	"europe", "africa", "asia", "america",
-	// Chemie / fyzika základy
-	"element", "atom", "chemical", "material", "metal",
-	// Zahrádka
-	"garden", "vegetable", "fruit", "herb", "compost", "bee",
-	// Filozofie / umění
-	"philosophy", "art", "painting", "sculpture", "music",
-	"democracy", "justice", "ancient greece",
-}
-
 // DownloadConfig konfigurace stahování.
+// Topic filtering bylo odstraněno — downloader ukládá VŠECHNY NS=0 non-redirect články
+// do wiki_<lang>.db a filtrování se dělá až v cmd/wiki-filter přes SQL.
 type DownloadConfig struct {
-	URL        string
-	OutputDir  string
-	MaxPages   int      // 0 = bez limitu
-	Topics     []string // filtrovací klíčová slova (lowercase)
-	Lang       string   // "en", "simple", "cs"
+	URL       string
+	OutputDir string
+	MaxPages  int    // 0 = bez limitu
+	Lang      string // "en", "simple", "cs"
 }
 
 // Downloader stahuje a parsuje Wikipedia dump.
@@ -94,9 +77,6 @@ type Downloader struct {
 
 // NewDownloader vytvoří nový downloader.
 func NewDownloader(cfg DownloadConfig) *Downloader {
-	if len(cfg.Topics) == 0 {
-		cfg.Topics = DefaultTopics
-	}
 	return &Downloader{
 		cfg: cfg,
 		client: &http.Client{
@@ -105,10 +85,11 @@ func NewDownloader(cfg DownloadConfig) *Downloader {
 	}
 }
 
-// Download stáhne dump (pokud není cached) a synchronně parsuje stránky.
-// Pro každou nalezenou stránku zavolá fn — žádné kanály, žádný backpressure.
+// Download stáhne dump (pokud není cached) a synchronně parsuje články.
+// Pro každý NS=0 non-redirect článek zavolá fn s raw wikitext. Žádný filtr,
+// žádný cleaning — to dělá cmd/wiki-filter v další fázi pipeline.
 // Pokud fn vrátí error, parsování se zastaví.
-func (d *Downloader) Download(fn func(*Page) error) error {
+func (d *Downloader) Download(fn func(*Article) error) error {
 	lang := d.cfg.Lang
 	if lang == "" {
 		lang = "unknown"
@@ -184,10 +165,12 @@ func (d *Downloader) Download(fn func(*Page) error) error {
 
 	count := 0
 	scanned := 0
-	skipped := 0
 	start := time.Now()
 
 	// Progress ticker — tři metriky pro diagnostiku vrstev.
+	//   rozbaleno_MB   — rychlost dekomprese (bzip2/lbzip2 → pipe → bytesRead)
+	//   prošlo_stránek — rychlost XML parseru (včetně redirectů a ne-článků)
+	//   nalezeno       — počet článků odeslaných do callback fn (NS=0, non-redirect)
 	var scannedAtomic, countAtomic int64
 	stopTicker := make(chan struct{})
 	go func() {
@@ -228,30 +211,20 @@ parseLoop:
 			slog.Warn("decode page failed", "err", err)
 			continue
 		}
-
-		// Rychlé filtry: redirect stránky a ne-článkové namespace (talk, user, …).
-		if xp.Redirect != nil {
-			continue
-		}
-		if xp.NS != 0 {
-			continue
-		}
-
 		scanned++
 		atomic.StoreInt64(&scannedAtomic, int64(scanned))
 
-		rawText := xp.Revision.Text.Body
-		if !d.matchesTopic(xp.Title, rawText) {
-			skipped++
+		// Přeskoč redirecty a ne-článkové namespace (talk, user, šablony, …).
+		if xp.Redirect != nil || xp.NS != 0 {
 			continue
 		}
 
-		text := cleanWikitext(rawText)
-		if len(text) < 100 {
-			continue
-		}
-
-		if err := fn(&Page{Title: xp.Title, Text: text, Lang: d.cfg.Lang}); err != nil {
+		if err := fn(&Article{
+			ID:      xp.ID,
+			Title:   xp.Title,
+			RawText: xp.Revision.Text.Body,
+			Lang:    d.cfg.Lang,
+		}); err != nil {
 			return err
 		}
 		count++
@@ -267,7 +240,6 @@ parseLoop:
 		"rozbaleno_MB", fmt.Sprintf("%.1f", float64(atomic.LoadInt64(&bytesRead))/1e6),
 		"prošlo_stránek", scanned,
 		"nalezeno", count,
-		"přeskočeno", skipped,
 		"elapsed", time.Since(start).Round(time.Second),
 	)
 	return nil
@@ -428,26 +400,6 @@ func sanitize(data []byte) []byte {
 	return b.Bytes()
 }
 
-// matchesTopic vrátí true pokud titulek nebo začátek textu odpovídá tématu.
-func (d *Downloader) matchesTopic(title, text string) bool {
-	titleLower := strings.ToLower(title)
-	// Prvních 500 znaků textu — rychlý check
-	preview := strings.ToLower(text)
-	if len(preview) > 500 {
-		preview = preview[:500]
-	}
-
-	for _, topic := range d.cfg.Topics {
-		if strings.Contains(titleLower, topic) {
-			return true
-		}
-		if strings.Contains(preview, topic) {
-			return true
-		}
-	}
-	return false
-}
-
 // downloadFile stáhne dump do souboru s podporou resume (HTTP Range).
 // Pokud existuje nekompletní soubor, pokračuje od místa přerušení.
 // Vrací pouze error — caller zapisuje do errs kanálu.
@@ -567,9 +519,9 @@ func (d *Downloader) downloadFile(dest string) error {
 	return nil
 }
 
-// cleanWikitext odstraní základní wiki markup.
+// CleanWikitext odstraní základní wiki markup (šablony, linky, HTML tagy, heading markery).
 // Pro produkci doporučit pandoc nebo go-wikiparser.
-func cleanWikitext(text string) string {
+func CleanWikitext(text string) string {
 	var sb strings.Builder
 	sb.Grow(len(text))
 

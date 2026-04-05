@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ func main() {
 	source     := flag.String("source", "wiki", "Zdroj dat: 'wiki' nebo 'nntp'")
 	dataDir    := flag.String("data-dir", "./data", "Složka pro data")
 	lang       := flag.String("lang", "simple", "Jazyk Wikipedia: 'simple', 'cs', 'en'")
-	maxPages   := flag.Int("max-pages", 50000, "Max počet Wikipedia stránek (0 = vše)")
+	maxPages   := flag.Int("max-pages", 0, "Max počet Wikipedia stránek (0 = vše)")
 	nntpServer := flag.String("server", "", "NNTP server hostname")
 	nntpPort   := flag.Int("port", 119, "NNTP port (563=TLS, 119=plain)")
 	nntpTLS    := flag.Bool("tls", true, "Použít TLS")
@@ -33,7 +34,6 @@ func main() {
 	nntpPass   := flag.String("pass", "", "NNTP password")
 	groups     := flag.String("groups", "sci.bio,sci.geo.meteorology,rec.gardens,humanities.philosophy,soc.history,alt.history", "Usenet skupiny (čárkou oddělené)")
 	maxArticles := flag.Int("max-articles", 5000, "Max článků na skupinu")
-	topics     := flag.String("topics", "", "Filtrovací klíčová slova pro Wikipedia (čárkou oddělená; prázdné = výchozí)")
 	workers    := flag.Int("workers", 4, "Počet paralelních workerů pro NNTP")
 	logLevel   := flag.String("log", "info", "Log level: debug|info|warn")
 	flag.Parse()
@@ -55,105 +55,104 @@ func main() {
 		slog.Error("create data dir", "err", err)
 		os.Exit(1)
 	}
-	db, err := storage.Open(*dataDir + "/rag_edu.db")
-	if err != nil {
-		slog.Error("open db", "err", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	proc := pipeline.NewProcessor(pipeline.DefaultConfig())
-
-	var topicList []string
-	if *topics != "" {
-		for _, t := range strings.Split(*topics, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				topicList = append(topicList, strings.ToLower(t))
-			}
-		}
-	}
 
 	switch *source {
 	case "wiki":
-		runWiki(db, proc, *dataDir, *lang, *maxPages, topicList)
+		runWiki(*dataDir, *lang, *maxPages)
 	case "nntp":
 		if *nntpServer == "" {
 			slog.Error("--server je povinný pro NNTP")
 			os.Exit(1)
 		}
+		db, err := storage.Open(*dataDir + "/rag_edu.db")
+		if err != nil {
+			slog.Error("open db", "err", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+		proc := pipeline.NewProcessor(pipeline.DefaultConfig())
 		groupList := strings.Split(*groups, ",")
 		runNNTP(db, proc, *nntpServer, *nntpPort, *nntpTLS, *nntpUser, *nntpPass, groupList, *maxArticles, *workers)
 	default:
 		slog.Error("Neznámý source", "source", *source)
 		os.Exit(1)
 	}
-
-	count, _ := db.CountDocuments("")
-	slog.Info("Hotovo", "total_documents", count)
 }
 
-func runWiki(db *storage.DB, proc *pipeline.Processor, dataDir, lang string, maxPages int, topics []string) {
+// runWiki stáhne wiki dump a uloží VŠECHNY NS=0 non-redirect články
+// do wiki_<lang>.db (raw wikitext, žádný filtr, žádný chunking).
+// Filtrování + cleaning + chunking do rag_edu.db dělá cmd/wiki-filter.
+func runWiki(dataDir, lang string, maxPages int) {
 	urls := map[string]string{
 		"simple": wiki.SimpleEnDumpURL,
 		"cs":     wiki.CsDumpURL,
 		"en":     wiki.EnDumpURL,
 	}
-
 	url, ok := urls[lang]
 	if !ok {
 		slog.Error("Neznámý lang pro wiki", "lang", lang)
 		os.Exit(1)
 	}
 
+	wikiDBPath := filepath.Join(dataDir, "wiki_"+lang+".db")
+	wikiDB, err := storage.OpenWikiDB(wikiDBPath)
+	if err != nil {
+		slog.Error("open wiki db", "path", wikiDBPath, "err", err)
+		os.Exit(1)
+	}
+	defer wikiDB.Close()
+
 	cfg := wiki.DownloadConfig{
 		URL:       url,
-		OutputDir: dataDir + "/raw",
+		OutputDir: filepath.Join(dataDir, "raw"),
 		MaxPages:  maxPages,
-		Topics:    topics,
 		Lang:      lang,
 	}
+	dl := wiki.NewDownloader(cfg)
 
-	downloader := wiki.NewDownloader(cfg)
-
+	const batchSize = 10000
+	batch := make([]*storage.Article, 0, batchSize)
 	saved := 0
-	skipped := 0
+	seen := 0
 
-	err := downloader.Download(func(page *wiki.Page) error {
-		text := proc.ProcessWiki(page.Text)
-		if text == "" {
-			skipped++
-			return nil
+	flush := func() {
+		if len(batch) == 0 {
+			return
 		}
-
-		chunks := pipeline.ChunkText(text, 1500, 150)
-
-		var batch []*storage.Document
-		for i, chunk := range chunks {
-			title := page.Title
-			if len(chunks) > 1 {
-				title = fmt.Sprintf("%s (část %d)", page.Title, i+1)
-			}
-			batch = append(batch, &storage.Document{
-				Source: "wikipedia",
-				Lang:   lang,
-				Group:  "encyclopedia",
-				Title:  title,
-				Text:   chunk,
-			})
-		}
-
-		n, err := db.SaveDocumentBatch(batch)
+		n, err := wikiDB.SaveArticleBatch(batch)
 		if err != nil {
-			slog.Debug("batch save error", "title", page.Title, "err", err)
+			slog.Error("save article batch", "err", err, "batch_size", len(batch))
 		}
 		saved += n
+		batch = batch[:0]
+	}
+
+	err = dl.Download(func(a *wiki.Article) error {
+		seen++
+		batch = append(batch, &storage.Article{
+			ID:      a.ID,
+			Title:   a.Title,
+			NS:      0,
+			RawText: a.RawText,
+		})
+		if len(batch) >= batchSize {
+			flush()
+		}
 		return nil
 	})
+	flush()
 
 	if err != nil {
 		slog.Error("Wiki chyba", "err", err)
 	}
-	slog.Info("Wiki import hotov", "saved", saved, "skipped", skipped)
+
+	total, _ := wikiDB.CountArticles()
+	slog.Info("Wiki import hotov",
+		"wiki_db", wikiDBPath,
+		"seen_this_run", seen,
+		"saved_this_run", saved,
+		"total_in_db", total,
+	)
 }
 
 func runNNTP(
