@@ -118,6 +118,11 @@ func ChunkText(text string, maxChunkSize, overlap int) []string {
 			chunks = append(chunks, chunk)
 		}
 
+		// Dosáhli jsme konce — konec smyčky
+		if end >= total {
+			break
+		}
+
 		// Posun s překryvem
 		start = end - overlap
 		if start < 0 {

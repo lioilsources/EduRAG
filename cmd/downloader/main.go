@@ -70,7 +70,9 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
-		proc := pipeline.NewProcessor(pipeline.DefaultConfig())
+		cfg := pipeline.DefaultConfig()
+		cfg.MaxLength = 0 // chunky nahradí truncate
+		proc := pipeline.NewProcessor(cfg)
 		groupList := strings.Split(*groups, ",")
 		runNNTP(db, proc, *nntpServer, *nntpPort, *nntpTLS, *nntpUser, *nntpPass, groupList, *maxArticles, *workers)
 	default:
@@ -218,6 +220,18 @@ func runNNTP(
 
 		articles, errs := testClient.FetchRange(group, first, info.Last, workers)
 
+		const docBatchSize = 1000
+		docBatch := make([]*storage.Document, 0, docBatchSize)
+		flushBatch := func() {
+			if len(docBatch) == 0 {
+				return
+			}
+			if _, err := db.SaveDocumentBatch(docBatch); err != nil {
+				slog.Error("save document batch", "err", err)
+			}
+			docBatch = docBatch[:0]
+		}
+
 		saved := 0
 		skipped := 0
 		processed := 0
@@ -248,21 +262,27 @@ func runNNTP(
 
 			lang := pipeline.DetectLanguage(text)
 
-			doc := &storage.Document{
-				Source: "usenet",
-				Lang:   lang,
-				Group:  article.Newsgroup,
-				Title:  article.Subject,
-				Text:   text,
+			chunks := pipeline.ChunkText(text, 1500, 150)
+			for j, chunk := range chunks {
+				title := article.Subject
+				if len(chunks) > 1 {
+					title = fmt.Sprintf("%s (část %d)", article.Subject, j+1)
+				}
+				docBatch = append(docBatch, &storage.Document{
+					ID:     fmt.Sprintf("nntp_%s_%d", article.MessageID, j),
+					Source: "usenet",
+					Lang:   lang,
+					Group:  article.Newsgroup,
+					Title:  title,
+					Text:   chunk,
+				})
 			}
-			doc.ID = "nntp_" + article.MessageID
-
-			if err := db.SaveDocument(doc); err != nil {
-				skipped++
-				continue
+			if len(docBatch) >= docBatchSize {
+				flushBatch()
 			}
 			saved++
 		}
+		flushBatch()
 
 		if err := <-errs; err != nil {
 			slog.Error("NNTP error", "group", group, "err", err)
