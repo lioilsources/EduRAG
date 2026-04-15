@@ -1,0 +1,19 @@
+{
+  "name": "Go + LunaRoute + Continue (SPARK ol1n)",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "Continue.continue"
+      ]
+    }
+  },
+  "postCreateCommand": "go mod download && echo '✅ Go dev container ready. LunaRoute + Continue nakonfigurováno.'",
+  "forwardPorts": [8081],
+  "remoteEnv": {
+    "OPENAI_BASE_URL": "http://lunaroute:8081/v1"
+  }
+}
