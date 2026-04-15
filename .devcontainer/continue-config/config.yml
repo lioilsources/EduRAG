@@ -1,0 +1,11 @@
+models:
+  - name: spark-ol1n
+    provider: openai
+    model: gdx-spark   # ← uprav na přesný název modelu, který tvůj SPARK endpoint podporuje
+    apiBase: http://lunaroute:8081/v1
+    apiKey: "${{ secrets.SPARK_API_KEY }}"   # načte se z .env
+
+tabAutocompleteModel:
+  name: spark-ol1n
+
+# Případně další nastavení (rules, prompts atd.)
