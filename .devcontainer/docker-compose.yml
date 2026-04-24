@@ -1,28 +1,24 @@
-version: '3.8'
-
 services:
   lunaroute:
-    image: ghcr.io/erans/lunaroute-server:latest
-    container_name: lunaroute-proxy
+    build:
+      context: ./lunaroute
+      dockerfile: ../Dockerfile.lunaroute
     restart: unless-stopped
     ports:
       - "8081:8081"
     volumes:
-      - ./lunaroute-config.yaml:/app/config.yaml:ro
+      - ./luna-route.config:/app/config.yaml:ro
     networks:
       - devnet
     command: ["--config", "/app/config.yaml"]
-
   dev:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: go-dev-container
     volumes:
-      - ..:/workspace:cached
-      # Mount Continue config + .env do home (řeší problém s uživatelem vscode)
-      - ./continue-config/config.yaml:/home/vscode/.continue/config.yaml:ro
-      - ./continue-config/.env:/home/vscode/.continue/.env:ro
+      - ..:/workspace:cached,z
+      - ./continue-config/config.yaml:/home/vscode/.continue/config.yaml:ro,z
+      - ./continue-config/.env:/home/vscode/.continue/.env:ro,z
     working_dir: /workspace
     networks:
       - devnet
@@ -30,7 +26,7 @@ services:
       - lunaroute
     environment:
       - OPENAI_BASE_URL=http://lunaroute:8081/v1
-
+    command: sleep infinity
 networks:
   devnet:
     driver: bridge

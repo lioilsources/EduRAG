@@ -15,5 +15,8 @@
   "forwardPorts": [8081],
   "remoteEnv": {
     "OPENAI_BASE_URL": "http://lunaroute:8081/v1"
-  }
+  },
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": false
 }

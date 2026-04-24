@@ -32,6 +32,9 @@ models/
 .DS_Store
 Thumbs.db
 
+# Devcontainer dependencies
+.devcontainer/lunaroute/
+
 # IDE
 .idea/
 .vscode/

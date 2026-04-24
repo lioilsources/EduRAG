@@ -1,5 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/go:1-1.23
+FROM mcr.microsoft.com/devcontainers/go:1.25
 
-# Základní Go tooling
-RUN go install golang.org/x/tools/gopls@latest && \
-    go install github.com/go-delve/delve/cmd/dlv@latest
+# gopls a dlv nainstaluje automaticky Go extension ve VS Code
+# (není nutné instalovat ručně v Dockerfile)
